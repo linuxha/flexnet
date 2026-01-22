@@ -1,0 +1,268 @@
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    1
+------------------------------------------- RMOUNT.ASM --------------------------------------------
+
+250 lines read, no errors in pass 1.
+                        *   File name:  rmount.asm
+                        *
+                        *   This utility will "MOUNT" a .DSK file
+                        *   on a remote host computer, that is running NETPC.
+                        *   netdrv must already be running on the FLEX computer.
+                        *
+                        *   Syntax: RMOUNT <file_name>
+                        *
+                        *   Note: <file_name> may contain the whole directory path,
+                        *         including the disk name, for example "C:\dir1\dir2\.."
+                        *         In order to achieve this, the FLEX EOL character is
+                        *         temporarily cleared. Thus, multiple commands on one
+                        *         line can be used with this utility, only if RMOUNT
+                        *         is the last command on the line.
+                        *
+                        *   Vn  01.00   2000-09-25, BjB.
+                        *       01.01   2002-05-01 js Use the serial routines in NETDRV
+                        *       02.01   2002-08-31 js Use signature string
+                        *       02.02   2002-09-19 js New vectors
+                        *       02.03   2002-10-06 js Check for proper extension
+                        *       02.04   2002-11-12 js Add read/write status check
+                        *       02.05   2024-08-01 Wrede adepted to SBC6803
+                        *
+                        * ---------------------------------------------------------------
+                        *
+                        *   FLEX equates.
+                        *
+ad03 =                  warms   equ     $AD03        ;   FLEX warm start
+ad1e =                  pstrng  equ     $AD1E        ;   write string to display
+ad24 =                  pcrlf   equ     $AD24        ;   write cr/lf to display
+ad27 =                  nxtch   equ     $AD27        ;   get next buffer character
+ac2b =                  MEMEND  EQU     $AC2B
+                        *
+ac14 =                  ttylbp  equ     $AC14        ;  line buffer pointer location
+ac02 =                  ttyeol  equ     $AC02        ;   end of line character location
+                        *
+                        * ---------------------------------------------------------------
+                        *
+0006 =                  ack     equ     $06          ;  acknowledge character
+000d =                  cr      equ     $0D          ;  carriage return character
+                        
+                        *
+                        * ***************************************************************
+                        *
+a100 =                          org     $A100
+a100 : 200a             start BRA COLD
+                        *
+                        *
+a102 : 0205             versn   fdb     $0205        ;   version number
+a104 : 00               eoltmp  rmb     1            ;  temp storage for EOL character
+a105 : 00               chrcnt  rmb     1            ;   character counter
+                        
+                        * Serial input/output vectors
+                        * The following 2 JMPs are initialized
+                        * with the addresses of the serial in/out
+                        * vectors which are at the start of NETDRV
+                        * The default (WARMS) is a dummy value
+                        
+a106 : 7ead03           schar JMP warms
+a109 : 7ead03           rchar JMP warms
+                        
+                        
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    2
+------------------------------------------- RMOUNT.ASM --------------------------------------------
+
+                        * START OF CODE
+a10c :                  COLD ;EQU *
+                        *
+                        * SBC6803 no MEMEND scan necessary
+                        *
+                        * Scan if a copy of FLEXNet is already loaded
+                        * search "netU"
+                        *
+a10c : ce8015           search  LDX     #$8015    ; FLEXNET driver here
+a10f : 866e                     LDAA    #"n"
+a111 : a100                     CMPA    0,X
+a113 : 2614                     BNE     sear4     ; no match
+a115 : 8665                     LDAA    #"e"
+a117 : a101                     CMPA    1,X
+a119 : 260e                     BNE     sear4
+a11b : 8674                     LDAA    #"t"
+a11d : a102                     CMPA    2,X
+a11f : 2608                     BNE     sear4
+a121 : 8655                     LDAA    #"U"
+a123 : a103                     CMPA    3,X
+a125 : 2602                     BNE     sear4     ; no match finally
+a127 : 2006                     BRA     foundit
+a129 : 7ea1d3           sear4   JMP     noload
+                        *
+                        * Long jumps
+                        *
+a12c : 7ea1e2           Mnwrkng JMP    nwrkng
+                        *
+                        * string was found, all is OK
+                        * Set the address of the in/out vectors
+                        *
+a12f : ce801d           foundit LDX     #$801D    ; address of schar vector
+a132 : ffa107                   STX     schar+1
+a135 : ce8020                   LDX     #$8020    ; address of rchar vector
+a138 : ffa10a                   STX     rchar+1
+                        *
+                        * ---------------------------------------------------------------
+                        *
+a13b : bdad24           check   jsr     pcrlf
+                        
+a13e : b6ac02                   ldaa    ttyeol        ;  save EOL character
+a141 : b7a104                   staa    eoltmp
+                        
+a144 : 8651                     ldaa    #"Q"          ;  quick check that communication is working
+a146 : 8dbe                     JSR     schar
+a148 : 24e2                     bcc     Mnwrkng       ;  time out, communication not working
+                        
+a14a : 8dbd                     JSR     rchar         ;  get response
+a14c : 24de                     bcc     Mnwrkng       ;  time out, communication not working
+a14e : 8106                     cmpa    #ack          ;  got an ack?
+a150 : 26da                     bne     Mnwrkng       ;  communication not working
+                        
+                        *
+                        * -----------------------------------------------------
+                        *
+                        *  Check file name length/extension
+                        
+a152 : 7fa105                   clr     chrcnt
+a155 : feac14                   ldx     ttylbp
+                        
+a158 : a600             chec04  ldaa    0,X         ; x+  get character
+a15a : 08                       INX
+a15b : 8120                     cmpa    #$20        ;   skip leading spaces
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    3
+------------------------------------------- RMOUNT.ASM --------------------------------------------
+
+a15d : 27f9                     beq     chec04
+                        
+a15f : 810d             chec08  cmpa    #cr         ;   carriage return?
+a161 : 2727                     beq     chec12
+a163 : 812e                     cmpa    #"."        ;    Extension provided?
+a165 : 261b                     bne     chec10
+                        * the next characters must be "dsk"
+                        * SBC6803 direct check !
+                        
+a167 : a600                     LDAA    0,X
+a169 : 08                       INX
+a16a : 845f                     ANDA    #$5F        ; convert to uppercase
+a16c : 8144                     CMPA    #"D"        ; D?
+a16e : 265e                     BNE     badex       ; exit for bad extention
+a170 : a600                     LDAA    0,X
+a172 : 08                       INX
+a173 : 845f                     ANDA    #$5F        ; convert to uppercase
+a175 : 8153                     CMPA    #"S"        ; S?
+a177 : 2655                     BNE     badex       ; exit for bad extention
+a179 : a600                     LDAA    0,X
+a17b : 08                       INX
+a17c : 845f                     ANDA    #$5F        ; convert to uppercase
+a17e : 814b                     CMPA    #"K"        ; K?
+a180 : 264c                     BNE     badex       ; exit for bad extention
+                        
+                        *        ldy     #ext
+                        *
+                        *chec09  lda     ,x+
+                        *        anda    #$5f
+                        *        cmpa    ,y+
+                        *        bne     badex
+                        *        cmpy    #ext+3     ; test auf DSK string ende
+                        *        bne     chec09
+                        
+a182 : 7ca105           chec10  inc     chrcnt      ;  no, inc character count
+a185 : a600                     ldaa     0,X        ; x+   check next character
+a187 : 08                       INX
+a188 : 20d5                     bra     chec08
+                        
+a18a : b6a105           chec12  ldaa    chrcnt        ;  check character count
+a18d : 8102                     cmpa    #2            ;  less than 2 characters?
+a18f : 2556                     blo     badfnm        ;  yes, report bad file name
+                        *
+                        * ---------------------------------------------------------------
+                        *
+a191 : 7fac02           main    clr     ttyeol        ;  disable TTYEOL
+                        
+a194 : 864d                     ldaa    #"M"          ; send M(ount) command to remote host
+a196 : bda106                   JSR     schar
+a199 : 2447                     bcc     nwrkng        ; time out, communication not working
+                        *
+a19b : bdad27           main04  jsr     nxtch         ; skip leading spaces
+a19e : 8120                     cmpa    #$20
+a1a0 : 27f9                     beq     main04
+                        
+a1a2 : bda106           main08  JSR     schar         ; send one character to remote host
+a1a5 : 243b                     bcc     nwrkng        ; time out, communication not working
+a1a7 : 810d                     cmpa    #cr           ; last character in line?
+a1a9 : 270b                     beq     main12
+a1ab : bdad27                   jsr     nxtch         ; get next character
+a1ae : 812e                     cmpa    #"."           ; substitute cr for dot
+a1b0 : 26f0                     bne     main08
+a1b2 : 860d                     ldaa    #cr
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    4
+------------------------------------------- RMOUNT.ASM --------------------------------------------
+
+a1b4 : 20ec                     bra     main08
+                        *
+a1b6 : bda109           main12  JSR     rchar         ; get response
+a1b9 : 2427                     bcc     nwrkng        ; time out, communication not working
+a1bb : 8106                     cmpa    #ack          ; got an ack?
+a1bd : 2628                     bne     badfnm        ; no, report bad file name
+                        *
+                        * Check for "R" or "W" after the ack
+                        *
+a1bf : bda109                   JSR     rchar         ; get character
+a1c2 : 241e                     bcc     nwrkng        ; time out, not working
+a1c4 : 8152                     cmpa    #"R"          ; Read only?
+a1c6 : 2710                     beq     read
+a1c8 : 8157                     cmpa    #"W"          ; Write only?
+a1ca : 2711                     beq     write
+a1cc : 2019                     bra     badfnm        ; otherwise, report error
+                        
+                        *
+                        * ---------------------------------------------------------------
+a1ce : cea1f6           badex   ldx     #exten        ; Bad extension
+a1d1 : 2017                     bra     finish
+                        
+a1d3 : cea29a           noload  ldx     #nodrv        ; Driver not found
+a1d6 : 2012                     bra     finish
+                        
+a1d8 : cea23f           read    ldx     #readst       ; Read-only message
+a1db : 200d                     bra     finish
+                        
+a1dd : cea25b           write   ldx     #writest      ; Full access message
+a1e0 : 2008                     bra     finish
+                        
+a1e2 : cea20d           nwrkng  ldx     #nwrkst       ; communication is not working
+a1e5 : 2003                     bra     finish
+                        *
+a1e7 : cea22b           badfnm  ldx     #badfst       ; bad file name
+                        *
+a1ea : b6a104           finish  ldaa    eoltmp        ; restore EOL character
+a1ed : b7ac02                   staa    ttyeol
+a1f0 : bdad1e                   jsr     pstrng        ; print string pointed to by XREG
+a1f3 : 7ead03                   jmp     warms         ; back to FLEX
+                        *
+                        * ---------------------------------------------------------------
+                        *
+a1f6 : 496c6c6567616c.. exten   fcc     "Illegal file extension"
+a20c : 04                       FCB     4
+a20d : 436f6d6d756e69.. nwrkst  fcc     "Communication is not working!"
+a22a : 04                       FCB     4
+a22b : 436f756c64206e.. badfst  fcc     "Could not open file"
+a23e : 04                       FCB     4
+a23f : 46696c65206f70.. readst  fcc     "File open in read-only mode"
+a25a : 04                       FCB     4
+a25b : 46696c65206f70.. writest fcc     "File opened with full access (read/write)"
+a284 : 04                       FCB     4
+a285 : 436f6d6d616e64.. succst  fcc     "Command executed OK."
+a299 : 04                       FCB     4
+a29a : 4e455444525620.. nodrv   fcc     "NETDRV is not loaded in memory, no action taken."
+a2ca : 04                       FCB     4
+                        
+                        * Extension string
+a2cb : 44534b           ext     fcc    "DSK"
+                        
+                                end  ;   start
+                        
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    5
+------------------------------------------- RMOUNT.ASM --------------------------------------------
+
+No errors in pass 2.

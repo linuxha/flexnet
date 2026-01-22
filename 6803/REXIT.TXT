@@ -1,0 +1,224 @@
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    1
+-------------------------------------------- REXIT.ASM --------------------------------------------
+
+209 lines read, no errors in pass 1.
+                        *        NAM     REXIT
+                        *
+                        * "RemoteEXIT" command does the following:
+                        *
+                        * - Exit NETPC which is running on the PC
+                        * - Reset the Flex disk driver vectors to their
+                        *   original values
+                        * - Clear (i.e. fill with zeroes) the space used
+                        *   by the NETDRV drivers
+                        * - Reset MEMEND to recover the free memory space,
+                        *   but do so ONLY if the NETDRV code was located
+                        *   immediately above MEMEND.
+                        *
+                        *
+                        *       01.01   2002-11-29 js Initial version
+                        *       01.02   2024-07-31 Wrede SBC6803
+                        * ---------------------------------------------------------------
+                        
+                        * FLEX ROUTINES EQUATES
+                        *
+ac14 =                  TTYLBP  EQU $AC14 ;LINE BUFFER POINTER
+ac02 =                  TTYEOL  EQU $AC02 ;EOL CHARACTER LOCATION
+                        
+b3e5 =                  INCHNE  EQU $B3E5 ;INPUT_NO_ECHO VECTOR
+ac2b =                  MEMEND  EQU $AC2B ;MEMORY END POINTER
+ad1e =                  PSTRNG  EQU $AD1E
+ad18 =                  PUTCHR  EQU $AD18
+ad27 =                  NXTCH   EQU $AD27
+ad39 =                  OUTDEC  EQU $AD39
+ad42 =                  GETHEX  EQU $AD42
+ad15 =                  GETCHR  EQU $AD15
+ad24 =                  PCRLF   EQU $AD24
+ad1b =                  INBUF   EQU $AD1B
+ad21 =                  CLASS   EQU $AD21
+ad2d =                  GETFIL  EQU $AD2D
+ad48 =                  INDEC   EQU $AD48
+b406 =                  FMS     EQU $B406
+b403 =                  FMSCLS  EQU $B403
+ad03 =                  WARMS   EQU $AD03
+                        *
+                        * ASCII STUFF
+000d =                  CR      EQU $0D
+000a =                  LF      EQU $0A
+0006 =                  ACK     EQU $06
+0015 =                  NACK    EQU $15
+001b =                  ESC     EQU $1B
+0008 =                  BS      EQU 8
+                        
+a100 =                          ORG     $A100
+a100 : 2011                     BRA     search
+                        
+                        * VERSION NUMBER
+                        
+a102 : 0102             VN      FCB     1,2
+                        
+                        * TEMP STORAGE
+                        
+a104 : 0000             base    RMB     2         ; start of signature string
+a106 : 0000             size    RMB     2         ;  size of driver code
+a108 : 0000             XTEMP09 RMB     2
+a10a : 0000             YTEMP09 RMB     2
+a10c : 00               BTEMP09 RMB     1
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    2
+-------------------------------------------- REXIT.ASM --------------------------------------------
+
+                        
+                        * Serial input/output vectors
+                        * The following 2 JMPs are initialized
+                        * with the addresses of the serial in/out
+                        * vectors which are at the start of NETDRV
+                        * The default (WARMS) is a dummy value
+                        
+a10d : 7ead03           schar   JMP     WARMS
+a110 : 7ead03           rchar   JMP     WARMS
+                        
+ac2b =                  memend  equ     $AC2B           ; FLEX end of user RAM
+                        *
+                        
+                        *-----------------------------------------
+                        * Step 0: Check for Netpc drivers in memory; if
+                        *         they are not loaded, just exit.
+                        *
+                        *
+                        * Scan if a copy of FLEXNet is already loaded
+                        * search "netU"
+                        *
+a113 : ce8015           search  LDX #$8015             ; FLEXNET driver here
+a116 : 866e                     LDAA #"n"
+a118 : a100                     CMPA 0,X
+a11a : 2614                     BNE sear4               ; no match
+a11c : 8665                     LDAA #"e"
+a11e : a101                     CMPA 1,X
+a120 : 260e                     BNE sear4
+a122 : 8674                     LDAA #"t"
+a124 : a102                     CMPA 2,X
+a126 : 2608                     BNE sear4
+a128 : 8655                     LDAA #"U"
+a12a : a103                     CMPA 3,X
+a12c : 2602                     BNE sear4               ; no match finally
+a12e : 2003                     BRA foundit
+a130 : 7ea191           sear4   JMP noload
+                        *
+                        * Signature string was found, all is OK
+                        * Proceed with utility!
+                        
+                        *--------------------------------------
+                        *
+                        * Step 1: Store start and end pointers
+                        *
+                        
+                        * Store drivers start address
+a133 : ffa108           foundit STX     XTEMP09
+                        *        LDD     XTEMP09
+                        *        tfr     x,d
+                        *        subd    #21            ; point to start of code
+a136 : cc8000                   LDD     #$8000         ; base is fix here !
+a139 : fda104                   std     base           ; store pointer
+                        
+                        * Set the address of the in/out vectors
+a13c : ce801d                   LDX     #$801D         ; points to JMP of netdriver
+a13f : ffa10e                   STX     schar+1        ; update JMP warms to real pointer
+a142 : ce8020                   LDX     #$8020
+a145 : ffa111                   STX     rchar+1
+                        
+                        * Read size of drivers and store it
+                        
+a148 : fc803d                   ldd     $803D         ; drvend info in NET driver
+a14b : 847f                     ANDA    #$7F          ; through away MSbit to get number of bytes !
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    3
+-------------------------------------------- REXIT.ASM --------------------------------------------
+
+a14d : fda106                   std     size
+                        
+                        *----------------------------------
+                        *
+                        * Step 2: Send the "Exit" command
+                        
+a150 : 8645                     LDAA    #"E"
+a152 : 8db9                     JSR     schar         ;  send command
+a154 : 2445                     BCC     NOWORK        ;  exit if time-out
+                        
+                        * WAIT FOR ACK
+                        
+a156 : 8db8             WTACK   JSR     rchar         ;  Receive character
+a158 : 2441                     BCC     NOWORK        ;  exit if time-out
+a15a : 8106                     CMPA    #ACK          ;  "ack" received?
+a15c : 26f8                     BNE     WTACK         ;  No, try again
+                        
+                        *----------------------------------
+                        *
+                        * Step 3: Restore the original Flex
+                        *         disk driver vectors
+                        
+a15e : c615             clear   ldab    #21            ; Restore 7 vectors
+a160 : fea104                   ldx     base           ; "from"     pointer
+a163 : ffa108                   STX     XTEMP09
+a166 : cebe80                   LDX     #$BE80         ; "to"     pointer
+a169 : ffa10a                   STX     YTEMP09
+                        * restore loop
+                        
+a16c : fea108           relp    LDX     XTEMP09
+a16f : a600                     ldaa    0,X            ;read from Net drivers
+a171 : 08                       INX
+a172 : ffa108                   STX     XTEMP09        ; do X+
+a175 : fea10a                   LDX     YTEMP09
+a178 : a700                     staa    0,X            ; Store in Flex area
+a17a : 08                       INX
+a17b : ffa10a                   STX     YTEMP09        ; do Y+
+a17e : 5a                       decb
+a17f : 26eb                     bne     relp           ; loop until done
+                        
+                        
+                        *---------------------------------
+                        *
+                        * Step 4: Fill driver space with zeroes
+                        *
+                        
+a181 : fea104                   ldx     base           ; Point to base address
+a184 : fca106                   ldd     size           ; Number of bytes to clear
+a187 : 6f00             fill    clr     0,X            ; clear one byte
+a189 : 08                       INX
+a18a : 830001                   subd    #1             ; count down
+a18d : 26f8                     bne     fill           ; loop until done
+                        
+                        *----------------------------------
+                        *
+                        * Step 5: No MEMEMD adjust here
+                        *
+a18f : 2005                     bra     EXITOK          ; No, exit without restoring MEMEND
+                        
+                        *------------------------------------
+                        * Message and exit routines
+                        
+a191 : cea1c1           noload  ldx     #nodrv          ; Inform that drivers are not loaded
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    4
+-------------------------------------------- REXIT.ASM --------------------------------------------
+
+a194 : 2008                     bra     finish
+                        
+a196 : cea1f2           EXITOK  ldx     #exitst         ; Report exit from program
+a199 : 2003                     bra     finish
+                        
+a19b : cea1a4           NOWORK  LDX     #TIMOUT         ; Report time-out error
+                        
+a19e : bdad1e           finish  JSR     PSTRNG
+a1a1 : 7ead03           EXIT2   JMP     WARMS
+                        
+                        
+                        * CHARACTER STRINGS
+                        
+a1a4 : 436f6d6d756e69.. TIMOUT  FCC     "Communication time-out error"
+a1c0 : 04                       FCB      4
+a1c1 : 4e455444525620.. nodrv   FCC     "NETDRV is not loaded in memory, no action taken."
+a1f1 : 04                       FCB      4
+a1f2 : 50726f6772616d.. exitst  fcc     "Program Exit"
+a1fe : 04                       FCB      4
+                        
+                         END    ; start at $A100
+                        
+No errors in pass 2.

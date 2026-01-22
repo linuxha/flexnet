@@ -1,0 +1,268 @@
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    1
+-------------------------------------------- RDIR.ASM ---------------------------------------------
+
+250 lines read, no errors in pass 1.
+                        * NAM RDIR
+                        *
+                        * REMOTE DIRECTORY LISTING THROUGH NETPC
+                        *
+                        * SYNTAX: RDIR <CR> TO LIST ALL FILES
+                        *         RDIR <PARAMETERS> TO PASS PARAMETERS TO
+                        *              THE MS-DOS COMMAND LINE
+                        *              (E.G. RDIR AB*  <CR>)
+                        
+                        *
+                        *       02.01   2002-08-31 js Use signature string
+                        *       02.02   2002-09-19 js New vectors
+                        *       02.03   2024-08-01 Wrede adepted to SBC6803
+                        *
+                        * LIB FLEXEQU
+                        * FLEX ROUTINES EQUATES
+                        *
+ac14 =                  TTYLBP  EQU $AC14 ;LINE BUFFER POINTER
+ac02 =                  TTYEOL  EQU $AC02 ;EOL CHARACTER LOCATION
+                        
+b3e5 =                  INCHNE  EQU $B3E5 ;INPUT_NO_ECHO VECTOR
+ac2b =                  MEMEND  EQU $AC2B ;MEMORY END POINTER
+ad1e =                  PSTRNG  EQU $AD1E
+ad18 =                  PUTCHR  EQU $AD18
+ad27 =                  NXTCH   EQU $AD27
+ad39 =                  OUTDEC  EQU $AD39
+ad42 =                  GETHEX  EQU $AD42
+ad15 =                  GETCHR  EQU $AD15
+ad24 =                  PCRLF   EQU $AD24
+ad1b =                  INBUF   EQU $AD1B
+ad21 =                  CLASS   EQU $AD21
+ad2d =                  GETFIL  EQU $AD2D
+ad48 =                  INDEC   EQU $AD48
+b406 =                  FMS     EQU $B406
+b403 =                  FMSCLS  EQU $B403
+ad03 =                  WARMS   EQU $AD03
+                        *
+                        * ASCII STUFF
+000d =                  CR      EQU $0D
+000a =                  LF      EQU $0A
+0006 =                  ACK     EQU $06
+0015 =                  NACK    EQU $15
+001b =                  ESC     EQU $1B
+0008 =                  BS      EQU 8
+                        *
+                        * SEPARATOR IN THE OUTPUT STREAM
+000d =                  SEP     EQU CR
+                        
+                        * LINES PER SCREEN
+0014 =                  SCREEN  EQU 20
+                        
+a100 =                   ORG $A100
+a100 : 200b              BRA    COLD
+                        
+                        * TEMP STORAGE
+                        
+a102 : 0203             vn     fcb 2,3
+a104 : 0000             PTR    RMB 2      ; POINTER IN BUFFER
+a106 : 00               COUNT  RMB 1      ; LINE COUNTER
+                        
+                        * Serial input/output vectors
+                        * set when utility is started
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    2
+-------------------------------------------- RDIR.ASM ---------------------------------------------
+
+                        *
+a107 : 7e0000           schar  fcb  $7E,0,0
+a10a : 7e0000           rchar  fcb  $7E,0,0
+                        *
+                        *
+a10d =                  COLD   EQU *          ; START OF CODE
+                        
+ac2b =                  memend  equ  $AC2B    ; FLEX end of user RAM
+                        
+                        *
+                        * SBC6803 no MEMEND scan necessary
+                        *
+                        * Scan if a copy of FLEXNet is already loaded
+                        * search "netU"
+                        *
+a10d : ce8015           search  LDX     #$8015    ; FLEXNET driver here
+a110 : 866e                     LDAA    #"n"
+a112 : a100                     CMPA    0,X
+a114 : 2614                     BNE     sear4     ; no match
+a116 : 8665                     LDAA    #"e"
+a118 : a101                     CMPA    1,X
+a11a : 260e                     BNE     sear4
+a11c : 8674                     LDAA    #"t"
+a11e : a102                     CMPA    2,X
+a120 : 2608                     BNE     sear4
+a122 : 8655                     LDAA    #"U"
+a124 : a103                     CMPA    3,X
+a126 : 2602                     BNE     sear4     ; no match finally
+a128 : 2003                     BRA     foundit
+a12a : 7ea1c9           sear4   JMP     noload
+                        *
+                        * string was found, all is OK
+                        * Set the address of the in/out vectors
+                        *
+a12d : ce801d           foundit LDX     #$801D    ; address of schar vector
+a130 : ffa108                   STX     schar+1
+a133 : ce8020                   LDX     #$8020    ; address of rchar vector
+a136 : ffa10b                   STX     rchar+1
+                        *
+                        * ---------------------------------------------------------------
+                        *
+                        
+                        *INITIALIZE THE BUFFER
+a139 : cea268                   LDX     #BUFFER
+a13c : ffa104                   STX     PTR      ; INITIALIZE POINTER
+                        
+                        * PUT THE "DIR" COMMAND
+a13f : 8641                     LDAA    #"A"
+a141 : bda1e2                   JSR     PUTIT
+                        *
+                        * READ THE FILE NAME FROM THE FLEX LINE
+                        * BUFFER
+                        * SKIP LEADING SPACES
+                        *
+a144 : bdad27           MAIN04  JSR     NXTCH
+a147 : 8120                     CMPA    #$20
+a149 : 27f9                     BEQ     MAIN04
+a14b : 810d             MAIN08  CMPA    #CR     ; END OF LINE?
+a14d : 2708                     BEQ     MAIN12
+a14f : bda1e2                   JSR     PUTIT   ; STORE IT IN BUFFER
+a152 : bdad27                   JSR     NXTCH
+a155 : 20f4                     BRA     MAIN08
+                        
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    3
+-------------------------------------------- RDIR.ASM ---------------------------------------------
+
+a157 =                  MAIN12 EQU *
+                        
+                        * SEND A <CR>
+a157 : 860d                     LDAA    #SEP
+a159 : bda1e2                   JSR     PUTIT
+                        
+                        * NOW TERMINATE THE STRING
+a15c : 4f                       CLRA
+a15d : bda1e2                   JSR     PUTIT
+                        
+                        * NOW SEND OUT THE CONTENTS OF
+                        * THE BUFFER AS ONE SERIAL STREAM
+a160 : cea268                   LDX     #BUFFER
+a163 : a600             LOOP    LDAA    0,X        ; post increment X+ after BCC
+a165 : 2707                     BEQ     SEREND
+a167 : 8d9e                     JSR     schar
+a169 : 2463                     BCC     NOWORK
+a16b : 08                       INX
+a16c : 20f5                     BRA     LOOP
+a16e =                  SEREND  EQU *
+                        *
+                        *
+                        * START A NEW SCREEN
+a16e : 8614             NEW    LDAA    #SCREEN
+a170 : b7a106                  STAA    COUNT
+                        
+                        * RECEIVE ONE LINE
+a173 =                  ONELIN  EQU *
+a173 : cea268                   LDX    #BUFFER    ; INITIALIZE POINTER
+a176 : ffa104                   STX    PTR
+a179 : 8d8f             LP1     JSR    rchar      ; GET CHAR
+a17b : 2451                     BCC    NOWORK
+a17d : 8106                     CMPA   #ACK       ; FINISHED?
+a17f : 2753                     BEQ    EXIT
+                        * STORE THE CHARACTER
+a181 : bda1e2                   JSR    PUTIT
+                        * LOOP IF NOT <LF>
+a184 : 810a                     CMPA   #LF
+a186 : 26f1                     BNE    LP1
+                        
+                        * LINE FEED RECEIVED, DISPLAY LINE ON CRT
+a188 : 4f                       CLRA             ; ADD TERMINATOR
+a189 : bda1e2                   JSR    PUTIT
+a18c : cea268                   LDX    #BUFFER
+a18f : bda1da                   JSR    PDATA
+                        
+                        * COUNT DOWN LINES
+a192 : 7aa106                   DEC    COUNT
+a195 : 2709                     BEQ    ASK
+                        
+                        * SEND A SPACE FOR NEXT LINE
+a197 : 8620                     LDAA   #$20
+a199 : bda107                   JSR    schar
+a19c : 2430                     BCC    NOWORK
+a19e : 20d3                     BRA    ONELIN
+                        
+                        * ASK THE USER
+a1a0 : cea1ec           ASK     LDX    #ASKUSR
+a1a3 : bda1da                   JSR    PDATA
+a1a6 : bdad15                   JSR    GETCHR
+a1a9 : 811b                     CMPA   #ESC
+a1ab : 2709                     BEQ    EX1
+a1ad : 8120                     CMPA   #$20
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    4
+-------------------------------------------- RDIR.ASM ---------------------------------------------
+
+a1af : 26ef                     BNE    ASK
+                        
+                        * GO FOR ANOTHER SCREEN
+a1b1 : bda107                   JSR    schar
+a1b4 : 20b8                     BRA    NEW
+                        
+                        * ESCAPE RECEIVED, SEND ESCAPE TO MSD0S
+a1b6 : bda107           EX1     JSR    schar
+a1b9 : 2413                     BCC    NOWORK
+a1bb : bdad24                   JSR    PCRLF
+                        
+                        * WAIT FOR ACK
+a1be : bda10a           WTACK   JSR    rchar
+a1c1 : 240b                     BCC    NOWORK
+a1c3 : 8106                     CMPA   #ACK
+a1c5 : 26f7                     BNE    WTACK
+a1c7 : 200b                     BRA    EXIT
+                        
+a1c9 : cea235           noload   ldx   #nodrv    ; Inform that drivers are not loaded
+a1cc : 2003                      bra   finish
+                        
+a1ce : cea216           NOWORK   LDX   #TIMOUT
+a1d1 : bda1da           finish   JSR   PDATA
+                        
+a1d4 : 7ead03           EXIT     JMP   WARMS
+                        
+                        * LOW-LEVEL ROUTINES
+                        * PRINT A STRING
+                        *
+a1d7 : bdad18           PDATA2   JSR  PUTCHR
+a1da : a600             PDATA    LDAA  0,X    ; post increment X+
+a1dc : 08                        INX
+a1dd : 8100                      CMPA #0      ; because of INX before
+a1df : 26f6                      BNE  PDATA2
+a1e1 : 39                        RTS
+                        
+                        * PUT A CHARACTER IN BUFFER
+a1e2 : fea104           PUTIT    LDX  PTR    ; GET POINTER
+a1e5 : a700                      STAA 0,X    ; X+ STORE BYTE AND BUMP PTR
+a1e7 : 08                        INX
+a1e8 : ffa104                    STX  PTR
+a1eb : 39                        RTS
+                        
+                        * CHARACTER STRINGS
+                        
+a1ec : 0d               ASKUSR FCB CR
+a1ed : 50726573732073..        FCC "Press spacebar to continue, ESC to stop "
+a215 : 00                      FCB 0
+                        
+a216 : 0d0a             TIMOUT FCB CR,LF
+a218 : 436f6d6d756e69..        FCC "Communication time-out error"
+a234 : 00                      FCB 0
+                        
+a235 : 0d0a             nodrv  FCB CR,LF
+a237 : 4e455444525620..        FCC "NETDRV is not loaded in memory, no action taken."
+a267 : 00                      FCB 0
+                        
+                        
+                        * BUFFER AREA
+a268 : 00000000000000.. BUFFER RMB 256
+                        
+                         END   ;$A100
+                        
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    5
+-------------------------------------------- RDIR.ASM ---------------------------------------------
+
+No errors in pass 2.

@@ -1,0 +1,185 @@
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    1
+--------------------------------------------- RCD.ASM ---------------------------------------------
+
+173 lines read, no errors in pass 1.
+                        *   File name:  RCD.TXT
+                        *
+                        *   This utility will Change to a new Directory (hence CD)
+                        *   on a remote host computer, that is running NETPC.
+                        *   netdrv must already be running on the FLEX computer.
+                        *
+                        *   Syntax: RCD <path>
+                        *
+                        *   Note: <path> may contain the whole directory path,
+                        *         including the disk name, for example "C:\dir1\dir2\.."
+                        *         In order to achieve this, the FLEX EOL character is
+                        *         temporarily cleared. Thus, multiple commands on one
+                        *         line can be used with this utility, only if RMOUNT
+                        *         is the last command on the line.
+                        *
+                        *   Adapted from Bjarne Backstrom's source code for RMOUNT
+                        *   by Joel Setton
+                        *
+                        *       02.01   2002-08-31 js Use signature string
+                        *       02.02   2002-09-19 js New vectors
+                        *       02.03   2024-08-01 Wrede adepted to SBC6803
+                        * ---------------------------------------------------------------
+                        *
+                        *   FLEX equates.
+                        *
+ad03 =                  warms   equ     $AD03     ;      FLEX warm start
+ad1e =                  pstrng  equ     $AD1E     ;      write string to display
+ad24 =                  pcrlf   equ     $AD24     ;      write cr/lf to display
+ad27 =                  nxtch   equ     $AD27     ;      get next buffer character
+ac2b =                  memend  equ     $AC2B     ;      memory end pointer
+                        *
+ac14 =                  ttylbp  equ     $AC14     ;      line buffer pointer location
+ac02 =                  ttyeol  equ     $AC02     ;      end of line character location
+                        *
+                        * ---------------------------------------------------------------
+                        *
+0006 =                  ack     equ     $06       ;     acknowledge character
+000d =                  cr      equ     $0d       ;     carriage return character
+                        
+                        *
+                        * ***************************************************************
+                        *
+a100 =                          org     $A100
+                        
+                        
+a100 =                  start EQU *
+a100 : 200a                     bra     COLD
+                        
+a102 : 0203             versn   fcb     2,3       ;      version number
+a104 : 00               eoltmp  rmb     1         ;      temp storage for EOL character
+a105 : 00               chrcnt  rmb     1         ;      character counter
+                        *
+                        * ---------------------------------------------------------------
+                        * Serial input/output vectors
+                        * The following 2 JMPs are initialized
+                        * with the addresses of the serial in/out
+                        * vectors which are at the start of NETDRV
+                        * The default (warms) is a dummy value
+                        *
+a106 : 7ead03           schar JMP warms
+a109 : 7ead03           rchar JMP warms
+                        *
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    2
+--------------------------------------------- RCD.ASM ---------------------------------------------
+
+a10c =                  COLD EQU *               ; START OF CODE
+                        *
+                        * SBC6803 no MEMEND scan necessary
+                        *
+                        * Scan if a copy of FLEXNet is already loaded
+                        * search "netU"
+                        *
+a10c : ce8015           search  LDX     #$8015    ; FLEXNET driver here
+a10f : 866e                     LDAA    #"n"
+a111 : a100                     CMPA    0,X
+a113 : 2614                     BNE     sear4     ; no match
+a115 : 8665                     LDAA    #"e"
+a117 : a101                     CMPA    1,X
+a119 : 260e                     BNE     sear4
+a11b : 8674                     LDAA    #"t"
+a11d : a102                     CMPA    2,X
+a11f : 2608                     BNE     sear4
+a121 : 8655                     LDAA    #"U"
+a123 : a103                     CMPA    3,X
+a125 : 2602                     BNE     sear4     ; no match finally
+a127 : 2003                     BRA     foundit
+a129 : 7ea190           sear4   JMP     noload
+                        *
+                        * string was found, all is OK
+                        * Set the address of the in/out vectors
+                        *
+a12c : ce801d           foundit LDX     #$801D    ; address of schar vector
+a12f : ffa107                   STX     schar+1
+a132 : ce8020                   LDX     #$8020    ; address of rchar vector
+a135 : ffa10a                   STX     rchar+1
+                        *
+                        * ---------------------------------------------------------------
+                        *
+                        *
+a138 : bdad24                   jsr     pcrlf
+                        
+a13b : b6ac02                   ldaa    ttyeol         ; save EOL character
+a13e : b7a104                   sta     eoltmp
+                        
+a141 : 7fa105                   clr     chrcnt         ; check file name length
+a144 : feac14                   ldx     ttylbp
+                        
+a147 : a600             chec04  ldaa    0,X            ; x+  get character
+a149 : 08                       INX
+a14a : 8120                     cmpa    #$20           ; skip leading spaces
+a14c : 27f9                     beq     chec04
+                        
+a14e : 810d             chec08  cmpa    #cr            ; carriage return?
+a150 : 2708                     beq     chec12
+a152 : 7ca105                   inc     chrcnt         ; no, inc character count
+a155 : a600                     ldaa    0,X            ; x+  check next character
+a157 : 08                       INX
+a158 : 20f4                     bra     chec08
+                        
+a15a : b6a105           chec12  ldaa    chrcnt         ; check character count
+a15d : 8102                     cmpa    #2             ; less than 2 characters?
+a15f : 2534                     blo     badfnm         ; yes, report bad file name
+                        *
+                        * ---------------------------------------------------------------
+                        *
+a161 : 7fac02                   clr     ttyeol         ; disable TTYEOL
+                        
+a164 : 8650                     ldaa    #"P"           ; send P (Point) command to remote host
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    3
+--------------------------------------------- RCD.ASM ---------------------------------------------
+
+a166 : 8d9e                     JSR     schar
+a168 : 2421                     bcc     nwrkng         ; time out, communication not working
+                        *
+a16a : bdad27           main04  jsr     nxtch          ; skip leading spaces
+a16d : 8120                     cmpa    #$20
+a16f : 27f9                     beq     main04
+                        
+a171 : 8d93             main08  JSR     schar          ; send one character to remote host
+a173 : 2416                     bcc     nwrkng         ; time out, communication not working
+a175 : 810d                     cmpa    #cr            ; last character in line?
+a177 : 2705                     beq     main12
+a179 : bdad27                   jsr     nxtch          ; get next character
+a17c : 20f3                     bra     main08
+                        *
+a17e : 8d89             main12  JSR     rchar          ; get response
+a180 : 2409                     bcc     nwrkng         ; time out, communication not working
+a182 : 8106                     cmpa    #ack           ; got an ack?
+a184 : 260f                     bne     badfnm         ; no, report bad file name
+a186 : cea1da                   ldx     #succst        ; report success
+a189 : 200d                     bra     finish
+                        *
+                        * ---------------------------------------------------------------
+                        *
+a18b : cea1a4           nwrkng  ldx     #nwrkst        ; communication is not working
+a18e : 2008                     bra     finish
+                        
+a190 : cea1ef           noload  ldx     #nodrv         ; Inform that drivers are not loaded
+a193 : 2009                     bra     finis2
+                        
+a195 : cea1c4           badfnm  ldx     #badfst        ; bad file name
+                        
+a198 : b6a104           finish  ldaa    eoltmp         ; restore EOL character
+a19b : b7ac02                   staa    ttyeol
+a19e : bdad1e           finis2  jsr     pstrng         ;print string pointed to by XREG
+a1a1 : 7ead03                   jmp     warms          ; back to FLEX
+                        *
+                        * ---------------------------------------------------------------
+                        *
+a1a4 : 436f6d6d756e69.. nwrkst  fcc     "Communication is not working!:"
+a1c2 : 0804                     FCB     8,4
+a1c4 : 42616420646972.. badfst  fcc     "Bad directory name!:"
+a1d8 : 0804                     FCB     8,4
+a1da : 436f6d6d616e64.. succst  fcc     "Command executed OK."
+a1ee : 04                       FCB     4
+a1ef : 4e455444525620.. nodrv   FCC     "NETDRV is not loaded in memory, no action taken."
+a21f : 04                       FCB     4
+                        
+                         end   ; start
+                        
+No errors in pass 2.

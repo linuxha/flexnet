@@ -1,0 +1,144 @@
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    1
+------------------------------------------- RESYNC.ASM --------------------------------------------
+
+132 lines read, no errors in pass 1.
+                        *   File name:  resync.asm
+                        *
+                        *   This utility will try to re-synchronize the communication
+                        *   between the FLEX/netdrv and the remote host computers.
+                        *
+                        *   Vn  01.00   2000-09-23, BjB.
+                        *       02.00   2002-05-01, js, use send/receive vectors
+                        *       02.01   2002-08-31  js Use signature string
+                        *       02.02   2002-09-19  js restore ACIA reset routine
+                        *       02.03   2024-08-01  Wrede adepted to SBC6803
+                        * --------------------------------------------------------------
+                        *
+                        *   FLEX equates.
+                        *
+ad03 =                  warms   equ     $AD03    ;       FLEX warm start
+ad1e =                  pstrng  equ     $AD1E    ;       write string to display
+ad24 =                  pcrlf   equ     $AD24    ;       write cr/lf to display
+ac2b =                  memend  equ     $AC2B    ;       memory end pointer
+                        *
+                        * ---------------------------------------------------------------
+                        *
+a100 =                          org     $A100
+                        
+a100 : 200d             start   bra     init
+                        
+a102 : 0203             versn   FCB     2,3     ;        version number
+a104 : 00               tries   rmb     1       ;        sync tries counter
+a105 : 00               tmp     rmb     1       ;        temporary storage for sync char
+                        *
+                        * ---------------------------------------------------------------
+                        *
+                        * Serial input/output vectors
+                        * The following 2 JMPs are initialized
+                        * with the addresses of the serial in/out
+                        * vectors which are at the start of NETDRV
+                        * The default (WARMS) is a dummy value
+                        *
+a106 : 7ead03           schar JMP warms
+a109 : 7ead03           rchar JMP warms
+a10c : 7ead03           reset JMP warms
+                        *
+a10f =                  init equ *                ; Start of code
+                        *
+                        * SBC6803 no MEMEND scan necessary
+                        *
+                        * Scan if a copy of FLEXNet is already loaded
+                        * search "netU"
+                        *
+a10f : ce8015           search  LDX     #$8015    ; FLEXNET driver here
+a112 : 866e                     LDAA    #"n"
+a114 : a100                     CMPA    0,X
+a116 : 2614                     BNE     sear4     ; no match
+a118 : 8665                     LDAA    #"e"
+a11a : a101                     CMPA    1,X
+a11c : 260e                     BNE     sear4
+a11e : 8674                     LDAA    #"t"
+a120 : a102                     CMPA    2,X
+a122 : 2608                     BNE     sear4
+a124 : 8655                     LDAA    #"U"
+a126 : a103                     CMPA    3,X
+a128 : 2602                     BNE     sear4     ; no match finally
+a12a : 2003                     BRA     foundit
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    2
+------------------------------------------- RESYNC.ASM --------------------------------------------
+
+a12c : 7ea17d           sear4   JMP     noload
+                        *
+                        * string was found, all is OK
+                        * Set the address of the in/out vectors
+                        *
+a12f : ce801d           foundit LDX     #$801D    ; address of schar vector
+a132 : ffa107                   STX     schar+1
+a135 : ce8020                   LDX     #$8020    ; address of rchar vector
+a138 : ffa10a                   STX     rchar+1
+a13b : ce8023                   LDX     #$8023    ; address of reset vector
+a13e : ffa10d                   STX     reset+1
+                        
+                        *   acia reset
+                        *
+a141 : 8dc9                     bsr reset
+                        
+                        *   Main routine.
+                        *
+a143 : bdad24                   jsr     pcrlf
+a146 : 8605                     ldaA    #$5        ;    number of tries
+a148 : b7a104                   staa    tries
+a14b : 8655                     ldaa    #$55       ;     1:st sync character
+                        
+a14d : b7a105           sync    sta     tmp        ;     current sync character
+                        
+a150 : 8db4             sync04  JSR     schar      ;     send character
+a152 : 2424                     bcc     sync16     ;     time-out, report error
+                        
+a154 : 8db3                     JSR     rchar      ;     get response
+a156 : 2420                     bcc     sync16     ;     time-out, report error
+                        
+a158 : b1a105                   cmpa    tmp        ;     received char same as sent?
+a15b : 270e                     beq     sync08     ;     yes
+a15d : b6a105                   ldaa    tmp        ;     1:st sync char?
+a160 : 8155                     cmpa    #$55
+a162 : 261e                     bne     sync20     ;     nope, report error
+                        
+a164 : 7aa104                   dec     tries      ;     decrement try count
+a167 : 26e7                     bne     sync04     ;     try again if not = 0
+a169 : 2017                     bra     sync20     ;     report error
+                        
+a16b : 81aa             sync08  cmpa    #$aa       ;     2:nd sync character?
+a16d : 2704                     beq     sync12     ;     yes, report success
+a16f : 86aa                     ldaa    #$aa       ;     send 2:nd sync character
+a171 : 20da                     bra     sync
+                        *
+a173 : cea18b           sync12  ldx     #succst    ;     "Connection successfully.."
+a176 : 200d                     bra     sync24
+                        
+a178 : cea1af           sync16  ldx     #timest    ;     "Time-out.."
+a17b : 2008                     bra     sync24
+                        
+a17d : cea1fd           noload  ldx     #nodrv     ; Inform that drivers are not loaded
+a180 : 2003                     bra     sync24
+                        
+a182 : cea1d3           sync20  ldx     #synest    ;     "Could not sync.."
+a185 : bdad1e           sync24  jsr     pstrng
+a188 : 7ead03                   jmp     warms      ;     back to FLEX
+                        *
+                        * ---------------------------------------------------------------
+                        *
+a18b : 436f6e6e656374.. succst  fcc     "Connection successfully established"
+a1ae : 04                       FCB      4
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    3
+------------------------------------------- RESYNC.ASM --------------------------------------------
+
+a1af : 54696d652d6f75.. timest  fcc     "Time-out error, connection broken!"
+a1d1 : 0804                     FCB      8,4
+a1d3 : 436f756c64206e.. synest  fcc     "Could not synchronize the communication!"
+a1fb : 0804                     FCB      8,4
+a1fd : 4e455444525620.. nodrv   FCC     "NETDRV is not loaded in memory, no action taken."
+a22d : 04                       FCB      4
+                        
+                                end   ;  start
+No errors in pass 2.

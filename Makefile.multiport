@@ -1,0 +1,31 @@
+CC = gcc
+CFLAGS = -Wall -g -O2
+LDFLAGS = -lyaml
+
+# Version 2.2.0 - Multi-port multi-drive support
+VERSION = 2.2.0
+
+# Targets
+all: flexnet flexnet_multiport
+
+flexnet: flexnet_original.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+flexnet_multiport: flexnet_final.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+# Install multi-drive version as the main executable
+install: flexnet_multiport
+	install -m 755 flexnet_multiport /usr/local/bin/flexnet
+	install -m 644 example.yaml /etc/flexnet.yaml.example
+	install -m 644 README.md /usr/local/share/doc/flexnet/
+	install -m 644 PROTOCOL.md /usr/local/share/doc/flexnet/
+
+clean:
+	rm -f flexnet flexnet_multiport *.o
+
+test: flexnet_multiport
+	./flexnet_multiport -V
+	@echo "FlexNet $(VERSION) build successful"
+
+.PHONY: all clean install test

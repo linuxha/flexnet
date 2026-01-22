@@ -1,0 +1,286 @@
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    1
+------------------------------------------- RDRIVE.ASM --------------------------------------------
+
+268 lines read, no errors in pass 1.
+                        *   File name:  RDRIVE.TXT
+                        *
+                        *   Syntax: RDRIVE <path>
+                        *
+                        *   Note: <path> may contain the whole directory path,
+                        *         including the disk name, for example "C:\dir1\dir2\.."
+                        *         In order to achieve this, the FLEX EOL character is
+                        *         temporarily cleared. Thus, multiple commands on one
+                        *         line can be used with this utility, only if RMOUNT
+                        *         is the last command on the line.
+                        *
+                        *   Adapted from Bjarne Backstrom's source code for RMOUNT
+                        *   by Joel Setton
+                        *
+                        *       02.01   2002-08-31 js Use signature string
+                        *       02.02   2002-09-19 js New vectors
+                        *       02.03   2002-11-23 js Longer delay if and only if the
+                        *                             drive is A or B, i.e. a floppy
+                        *       02.04   2002-11-24 js Do an "rwhich" command if no
+                        *                             parameters are specified
+                        *       02.05   2024-08-01 Wrede adepted to SBC6803
+                        * ---------------------------------------------------------------
+                        *
+                        *   FLEX equates.
+                        *
+ad03 =                  warms   equ     $AD03      ;     FLEX warm start
+ad18 =                  PUTCHR  equ     $AD18      ;     print one character
+ad1e =                  pstrng  equ     $AD1E      ;     write string to display
+ad24 =                  pcrlf   equ     $AD24      ;     write cr/lf to display
+ad27 =                  nxtch   equ     $AD27      ;     get next buffer character
+ac2b =                  memend  equ     $AC2B      ;     memory end pointer
+                        *
+ac14 =                  ttylbp  equ     $AC14      ;     line buffer pointer location
+ac02 =                  ttyeol  equ     $AC02      ;     end of line character location
+                        *
+                        * ---------------------------------------------------------------
+                        *
+0006 =                  ack     equ     $06        ;     acknowledge character
+000d =                  cr      equ     $0d        ;     carriage return character
+                        
+                        *
+                        * ***************************************************************
+                        *
+a100 =                          org     $A100
+                        
+a100 =                  start EQU *
+a100 : 200f                     bra     COLD
+                        
+a102 : 0205             versn   fcb     2,5     ;        version number
+a104 : 0000             PTR     rmb     2       ;        Pointer in buffer
+a106 : 00               eoltmp  rmb     1       ;        temp storage for EOL character
+a107 : 00               chrcnt  rmb     1       ;        character counter
+a108 : 0000             drvptr  rmb     2       ;        drive pointer
+a10a : 00               temp    rmb     1       ;        temp pointer for letter
+                        *
+                        * ---------------------------------------------------------------
+                        * Serial input/output vectors
+                        * The following 2 JMPs are initialized
+                        * with the addresses of the serial in/out
+                        * vectors which are at the start of NETDRV
+                        * The default (warms) is a dummy value
+                        *
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    2
+------------------------------------------- RDRIVE.ASM --------------------------------------------
+
+a10b : 7ead03           schar JMP warms
+a10e : 7ead03           rchar JMP warms
+                        *
+a111 =                  COLD EQU *         ; START OF CODE
+                        *
+                        * SBC6803 no MEMEND scan necessary
+                        *
+                        * Scan if a copy of FLEXNet is already loaded
+                        * search "netU"
+                        *
+a111 : ce8015           search  LDX     #$8015    ; FLEXNET driver here
+a114 : 866e                     LDAA    #"n"
+a116 : a100                     CMPA    0,X
+a118 : 2614                     BNE     sear4     ; no match
+a11a : 8665                     LDAA    #"e"
+a11c : a101                     CMPA    1,X
+a11e : 260e                     BNE     sear4
+a120 : 8674                     LDAA    #"t"
+a122 : a102                     CMPA    2,X
+a124 : 2608                     BNE     sear4
+a126 : 8655                     LDAA    #"U"
+a128 : a103                     CMPA    3,X
+a12a : 2602                     BNE     sear4     ; no match finally
+a12c : 2003                     BRA     foundit
+a12e : 7ea1a1           sear4   JMP     noload
+                        *
+                        * string was found, all is OK
+                        * Set the address of the in/out vectors
+                        *
+a131 : ce801d           foundit LDX     #$801D    ; address of schar vector
+a134 : ffa10c                   STX     schar+1
+a137 : ce8020                   LDX     #$8020    ; address of rchar vector
+a13a : ffa10f                   STX     rchar+1
+                        *
+                        * Set the drive letter pointer
+                        * leax 19,x               ; corrected to 19,x  old 6,x was wrong
+a13d : ce8033                   LDX    #$8033
+a140 : ffa108                   stx    drvptr
+                        
+                        *
+                        * ---------------------------------------------------------------
+                        *
+                        *       jsr     pcrlf       ;    (DELETED)
+                        
+a143 : b6ac02                   lda     ttyeol      ;    save EOL character
+a146 : b7a106                   sta     eoltmp
+                        
+a149 : 7fa107                   clr     chrcnt      ;    check file name length
+a14c : feac14                   ldx     ttylbp
+                        
+a14f : a600             chec04  ldaa    0,X         ; x+  get character
+a151 : 08                       INX
+a152 : 8120                     cmpa    #$20        ;    skip leading spaces
+a154 : 27f9                     beq     chec04
+                        
+a156 : b7a10a                   staa    temp        ;    store the first character after spaces
+                        
+a159 : 810d             chec08  cmpa    #cr         ;    carriage return?
+a15b : 2708                     beq     chec12
+a15d : 7ca107                   inc     chrcnt      ;    no, inc character count
+a160 : a600                     ldaa    0,X         ; x+ check next character
+a162 : 08                       INX
+a163 : 20f4                     bra     chec08
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    3
+------------------------------------------- RDRIVE.ASM --------------------------------------------
+
+                        
+a165 : b6a107           chec12  ldaa    chrcnt      ;    check character count
+a168 : 8101                     cmpa    #1          ;    less than 2 characters?
+a16a : 253d                     blo     where       ;    yes, do a "Where am I" command
+                        *
+                        * ---------------------------------------------------------------
+                        *
+a16c : 7fac02                   clr     ttyeol      ;    disable TTYEOL
+                        
+a16f : 8656                     ldaa    #"V"        ;    send V (driVe) command to remote host
+a171 : 8d98                     JSR     schar
+a173 : 2431                     bcc     Mnwrkng      ;    time out, communication not working
+                        *
+a175 : bdad27           main04  jsr     nxtch       ;    skip leading spaces
+a178 : 8120                     cmpa    #$20
+a17a : 27f9                     beq     main04
+                        
+a17c : 8d8d             main08  JSR     schar       ;    send one character to remote host
+a17e : 2426                     bcc     Mnwrkng      ;    time out, communication not working
+a180 : 810d                     cmpa    #cr         ;    last character in line?
+a182 : 2705                     beq     main12
+a184 : bdad27                   jsr     nxtch       ;    get next character
+a187 : 20f3                     bra     main08
+                        *
+a189 : 8d83             main12  JSR     rchar       ;    get response
+a18b : 2419                     bcc     Mnwrkng      ;    time out, communication not working
+a18d : 8106                     cmpa    #ack        ;    got an ack?
+a18f : 266e                     bne     badfnm      ;    no, report bad file name
+                        
+                        *
+                        *  Success!
+                        *
+                        *  store the drive letter
+a191 : b6a10a                   ldaa temp
+a194 : 4a                       deca                  ;    change a/b to @/a
+a195 : 845e                     anda   #$5e           ;    make upper case
+                        *        staa [drvptr]         ;    store it  !!! find other code
+a197 : fea108                   LDX    drvptr      ; get address of drv pointer
+a19a : a700                     STAA   0,X         ; store it into [drvptr]
+a19c : cea264                   ldx    #succst     ;    report success
+a19f : 2068                     bra    finish
+                        
+a1a1 : cea279           noload  ldx    #nodrv       ; Inform that drivers are not loaded
+a1a4 : 2069                     bra    finis2
+                        *
+                        * long branch jump
+a1a6 : 7ea204           Mnwrkng JMP    nwrkng
+                        * -----------------------------------------
+                        *
+                        * No parameters were typed, do a "Where am I" command
+                        *
+a1a9 =                  where equ *
+                        
+                        * SEND THE "WHERE" COMMAND
+a1a9 : 863f                    LDAA   #"?"
+a1ab : bda10b                  JSR    schar
+a1ae : 2454                    BCC    nwrkng
+                        
+                        * RECEIVE ONE LINE
+a1b0 : cea2aa                  LDX    #BUFFER   ; INITIALIZE POINTER
+a1b3 : ffa104                  STX    PTR
+a1b6 : bda10e           LP1    JSR    rchar     ; GET CHAR
+a1b9 : 2449                    BCC    nwrkng
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    4
+------------------------------------------- RDRIVE.ASM --------------------------------------------
+
+a1bb : 810d                    CMPA   #cr       ; FINISHED?
+a1bd : 2705                    BEQ    DISP
+                        * STORE THE CHARACTER
+a1bf : bda1f5                  JSR    PUTIT
+a1c2 : 20f2                    BRA    LP1
+                        
+a1c4 =                  DISP EQU *
+                        * LINE FEED RECEIVED, DISPLAY LINE ON CRT
+a1c4 : 4f                      CLRA             ; ADD TERMINATOR
+a1c5 : bda1f5                  JSR    PUTIT
+                        
+                        * set the drive code
+a1c8 : b6a2aa                  ldaa    BUFFER   ; get the first character of string
+a1cb : 4a                      deca
+a1cc : 845e                    anda    #$5e
+                        *       staa [drvptr]   ; !!! find code for that
+a1ce : fea108                  LDX    drvptr      ; get address of drv pointer
+a1d1 : a700                    STAA   0,X         ; store it into [drvptr]
+a1d3 : cea215                  LDX    #CURDIR
+a1d6 : bdad1e                  JSR    pstrng
+                        
+a1d9 : cea2aa            LDX #BUFFER
+a1dc : bda1ed            JSR PDATA
+                        
+                        * WAIT FOR ACK
+a1df : bda10e           WTACK   JSR    rchar
+a1e2 : 2420                     BCC    nwrkng
+a1e4 : 8106                     CMPA   #ack
+a1e6 : 26f7                     BNE    WTACK
+a1e8 : 2028                     BRA    exit2
+                        
+                        
+                        * LOW-LEVEL ROUTINES
+                        * PRINT A STRING
+                        *
+a1ea : bdad18           PDATA2  JSR    PUTCHR
+a1ed : a600             PDATA   LDAA   0,X
+a1ef : 08                       INX
+a1f0 : 8100                     CMPA   #0          ; because of INX
+a1f2 : 26f6                     BNE    PDATA2
+a1f4 : 39                       RTS
+                        
+                        * PUT A CHARACTER IN BUFFER
+a1f5 : fea104           PUTIT   LDX    PTR
+a1f8 : a700                     STAA   0,X          ; X+
+a1fa : 08                       INX
+a1fb : ffa104                   STX    PTR
+a1fe : 39                       RTS
+                        
+                        
+                        *
+                        *   Error/exit routines
+                        *
+a1ff : cea24f           badfnm  ldx     #badfst      ;   bad name
+a202 : 2005                     bra     finish
+                        *
+a204 : cea230           nwrkng  ldx     #nwrkst      ;   communication is not working
+a207 : 2000                     bra     finish
+                        *
+a209 : b6a106           finish  lda     eoltmp       ;   restore EOL character
+a20c : b7ac02                   sta     ttyeol
+a20f : bdad1e           finis2  jsr     pstrng       ;   print string pointed to by XREG
+a212 : 7ead03           exit2   jmp     warms        ;   back to FLEX
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    5
+------------------------------------------- RDRIVE.ASM --------------------------------------------
+
+                        *
+                        * ---------------------------------------------------------------
+                        *
+a215 : 54686520637572.. CURDIR  FCC     "The current directory is  "
+a22f : 04                       FCB     4
+a230 : 436f6d6d756e69.. nwrkst  fcc     "Communication is not working!"
+a24d : 0804                     FCB     8,4
+a24f : 42616420646972.. badfst  fcc     "Bad directory name!"
+a262 : 0804                     FCB     8,4
+a264 : 436f6d6d616e64.. succst  fcc     "Command executed OK."
+a278 : 04                       FCB     4
+a279 : 4e455444525620.. nodrv   FCC     "NETDRV is not loaded in memory, no action taken."
+a2a9 : 04                       FCB     4
+                        
+                        
+                        * BUFFER AREA
+a2aa : 00000000000000.. BUFFER RMB 256
+                                end  ;   start
+No errors in pass 2.

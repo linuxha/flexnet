@@ -1,0 +1,35 @@
+# FlexNet Multi-Port Multi-Drive Configuration
+# Version 2.2.0
+#
+# This configuration file defines multiple serial ports that can 
+# simultaneously serve up to 4 disk images each to Flex systems.
+# Each port supports drives A:, B:, C:, and D:
+
+ports:
+  - device: /dev/ttyS0      # First serial port
+    speed: 19200            # Baud rate for communication  
+    drives:                 # Up to 4 drives per port
+      - disk: flex_system.dsk    # Drive A: - System disk
+      - disk: flex_data.dsk      # Drive B: - Data disk
+      - disk: flex_games.dsk     # Drive C: - Games disk
+      # Drive D: not configured (optional)
+
+  - device: /dev/ttyUSB0    # Second serial port (USB adapter)
+    speed: 9600             # Different baud rate
+    drives:
+      - disk: development.dsk    # Drive A: - Development disk
+      - disk: backup.dsk         # Drive B: - Backup disk
+
+# Additional port examples (uncomment to use):
+#  - device: /dev/ttyS1
+#    speed: 19200  
+#    drives:
+#      - disk: system_disk.dsk   # Single drive configuration
+#
+#  - device: /dev/ttyUSB1
+#    speed: 19200
+#    drives:
+#      - disk: disk_a.dsk        # Four drive configuration
+#      - disk: disk_b.dsk
+#      - disk: disk_c.dsk
+#      - disk: disk_d.dsk

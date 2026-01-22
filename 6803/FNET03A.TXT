@@ -1,0 +1,802 @@
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    1
+------------------------------------------- FNET03A.ASM -------------------------------------------
+
+760 lines read, no errors in pass 1.
+                        *   File name   FNET03.txt
+                        *
+                        *   This is a driver package which implements
+                        *   a remote mounted ".DSK file drive" over a serial line.
+                        *
+                        *** If the remote end is running on a slow machine, you might have
+                        *   to remove the "***" comments, which will activate some delays
+                        *   and "hand shaking". There is also a constant in the "delay"
+                        *   routine, that can be changed for fine tuning. "As is," (with
+                        *   the "***" comments removed) the constants have been tuned to
+                        *   run with a 40 MHz 386 PC as the host computer.
+                        *
+                        *   Also, the "odelc" constant might have to be increased, if the
+                        *   remote end has a slow HD. Otherwise, a time-out error might
+                        *   occur during file pointer positioning.
+                        *
+                        *
+                        *   vn  01.00   2000-09-15, BjB
+                        *       01.01   2000-09-19, BjB:    fixing typos and omissions
+                        *       02.00   2000-09-24, BjB:    time-out if comm link is broken
+                        *       02.01   2000-09-24, BjB:    fixed verify
+                        *       02.03   2000-09-30, BjB:    options for "fast/slow PC"
+                        *       03.00   2002-05-01, js      Add jump vectors for rchar/schar
+                        *       03.01   2002-08-30, js      Add string search routine to
+                        *                                   avoid duplicate loads
+                        *       03.02   2002-09-19, JS      Add ACIA reset vector and move all
+                        *                                   vectors after signature
+                        *       03.03   2002-11-23, js      Add the "remember drive letter" functio
+                        *                                   and longer delay for floppies
+                        *       03.04   2002-11-29  js      Add a few pointers for uninstall
+                        *       03.05   2024-07-31  Wrede   convert to SBC6803 FLEX2 system
+                        *                                   carry set/unset in driver logic
+                        *                                   default delay to $FFFF
+                        * ---------------------------------------------------------------
+                        *
+8000 =                          org     $8000
+                        
+                        
+                        * The following lines should all stay together: jump table,
+                        * signature, vectors, and a few pointers. The Rxxx.CMD utilities
+                        * expect them to keep the same relative position, so if they
+                        * are moved they MUST be moved together as one single block.
+                        *
+                        *  ACIA is SER2 for FLEXNET
+                        *
+                        *   FLEX disk driver jump table 
+                        *
+8000 : 000000           fread   rmb     3               ;read single sector
+8003 : 000000           fwrite  rmb     3               ;write single sector
+8006 : 000000           fverfy  rmb     3               ;verify write operation
+8009 : 000000           frestr  rmb     3               ;restore head to track# 00
+800c : 000000           fdrive  rmb     3               ;drive selection
+800f : 000000           fcheck  rmb     3               ;check ready
+8012 : 000000           fquick  rmb     3               ;quick check ready
+                        
+                        * signature string
+                        
+8015 : 6e65745555647276 sgnst   fcc     'netUUdrv'
+0008 =                  len     equ     *-sgnst
+                        * orig LBRA
+801d : 7e824d                   JMP    schar          ;vector for send character
+8020 : 7e822d                   JMP    rchar          ;vector for receive character
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    2
+------------------------------------------- FNET03A.ASM -------------------------------------------
+
+8023 : 7e827c                   JMP    reset          ;vector for ACIA reset
+                        
+8026 : 464c45584e6574..         fcc     'FLEXNet 4.1.1'
+                        
+8033 : 00000000         drvltr  rmb     4               ;MS-DOS drive letter
+8037 : ff               netdrv  fcb     -1              ;Flex drive selected as DOS drive
+8038 : ff                       fcb     -1              ;-1 means no drive mapped
+8039 : ff                       fcb     -1
+803a : ff                       fcb     -1
+                        
+803b : 00               qcheck  fcb     0               ;0 = do not do Quick Check before reading a
+                        *                               ;1 = do Quick Check before reading and writ
+803c : 01               slowpc  fcb     1               ;0 = not slow PC
+                        *                               ;1 = Slow PC
+                        
+803d : 829e             size    fdb     drvend          ;Size of drivers
+                        
+                        * End of "block"
+                        
+                        *
+                        *   Local variables
+                        *
+803f : 00               curdrv  rmb     1               ;current drive from fcb
+8040 : 0000             curtrk  rmb     2               ;current ttss#
+8042 : 0000             chksum  rmb     2               ;checksum
+8044 : 00               cnt     rmb     1               ;div counter
+8045 : 00               lstdrv  rmb     1               ;latest drive# selected
+8046 : 00               delcnt  rmb     1               ;inner time-out delay counter
+                        *                               ;(default is drive 3)
+8047 : 0000             odelc   rmb     2               ;max delay
+                        *
+                        *  simulate 6809 with these registers
+                        *
+                        *             lines with  !!! must be checked
+                        *
+8049 : 0000             XTEMP09  RMB 2
+804b : 00               BTEMP09  RMB 1
+                        *
+                        *   Read one sector from 'net drive'
+                        *
+804c : 3c               nread   PSHX
+804d : 36                       PSHA                   ; save X,A on stack
+804e : 37                       PSHB                   ; save B on stack
+                        *        ldaa     -64+3,X         ;get requested drive#  OFFSET ?  !!!
+804f : a603                     LDAA    3,X             ; check index !!!
+8051 : b7803f                   staa    curdrv          ; extended address
+8054 : ce8037                   LDX     #netdrv         ; get address of netdrv table
+8057 : 16                       TAB
+8058 : 3a                       ABX                     ; add offset of drive
+                        *        
+8059 : a100                     cmpa    0,X             ;same as assigned 'net drive'#?
+805b : 33                       PULB
+805c : 32                       PULA
+805d : 38                       PULX                    ; restore A,B,X
+805e : 26a0                     bne     fread           ;no, do FLEX read routine
+8060 : 3c                       PSHX
+8061 : fd8040                   std     curtrk          ;save current ttss#
+8064 : 7f8042                   clr     chksum          ;clear checksum
+8067 : 7f8043                   clr     chksum+1
+806a : 7f8044                   clr     cnt             ;256 bytes to read
+                        *
+                        *   Q(uick) Check that remote drive is ready
+                        *
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    3
+------------------------------------------- FNET03A.ASM -------------------------------------------
+
+806d : b6803b                   ldaa    qcheck
+8070 : 2718                     beq     nqchk1
+8072 : 8651                     ldaa     #"Q"            ;Send Q command
+8074 : bd824d                   JSR     schar
+8077 : 2471                     BCC     nrea10          ;"Drive not ready" time out
+8079 : bd822d                   JSR     rchar           ;get response
+807c : 246c                     BCC     nrea10          ;time out
+807e : 8106                     cmpa    #ack            ;got an ack?
+8080 : 2668                     BNE     nrea10          ;nope, report error
+                        
+8082 : b6803c                   LDAA    slowpc
+8085 : 2703                     beq     nqchk1
+                        
+8087 : bd826d                   JSR     delay           ;for "slow PC" ***
+                        
+808a : 8673             nqchk1  ldaa    #"s"            ;Send sector command
+808c : bd824d                   JSR     schar
+808f : 2459                     bcc     nrea10          ;";Drive not ready"
+                        
+8091 : b6803c                   LDAA    slowpc
+8094 : 2703                     beq     ntslw1
+8096 : bd826d                   JSR     delay           ;for "slow PC" ***
+8099 : b6803f           ntslw1  ldaa    curdrv          ;drive number
+809c : bd824d                   JSR     schar
+809f : 2449                     bcc     nrea10
+80a1 : b68040                   ldaa    curtrk          ;tt#
+80a4 : bd824d                   JSR     schar
+80a7 : 2441                     bcc     nrea10
+80a9 : b68041                   ldaa    curtrk+1        ;ss#
+80ac : bd824d                   JSR     schar
+80af : 2439                     bcc     nrea10
+80b1 : bd822d           nrea04  JSR     rchar           ;read one byte
+80b4 : 2434                     bcc     nrea10
+80b6 : a700                     staa    0,X             ;store in FCB and move pointer
+80b8 : 08                       INX
+80b9 : bb8043                   adda    chksum+1        ;update checksum lsb
+80bc : b78043                   staa    chksum+1
+80bf : 2403                     bcc     nrea08          ;bra if no carry
+80c1 : 7c8042                   inc     chksum          ;update checksum msb
+80c4 : 7a8044           nrea08  dec     cnt             ;decrease byte count
+80c7 : 26e8                     bne     nrea04          ;loop till 0
+                        
+80c9 : bd822d                   JSR     rchar           ;get checksum msb
+80cc : 241c                     bcc     nrea10
+80ce : 36                       PSHA                    ;save for now
+80cf : bd822d                   JSR     rchar           ;get checksum lsb
+80d2 : 16                       TAB
+80d3 : 32                       PULA                    ;restore msb
+80d4 : 2414                     bcc     nrea10          ;time out?
+                        
+80d6 : b18042                   CMPA   chksum          ; compare MSB
+80d9 : 2613                     BNE    nrea12
+80db : f18043                   CMPB   chksum+1        ; compare LSB
+                        *        
+80de : 260e                     bne     nrea12          ;bra if checksum err
+                        
+80e0 : 8606                     ldaa    #ack            ;send ack char
+80e2 : bd824d                   JSR     schar
+80e5 : 2403                     bcc     nrea10
+80e7 : 5f                       clrb                    ;report okay
+80e8 : 200d                     bra     nrea16
+                        
+80ea : c610             nrea10  ldab    #16             ;report Drive not ready
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    4
+------------------------------------------- FNET03A.ASM -------------------------------------------
+
+80ec : 2009                     bra     nrea16
+                        
+80ee : 8615             nrea12  ldaa    #nak            ;send nak char
+80f0 : bd824d                   JSR     schar
+80f3 : 24f5                     bcc     nrea10
+80f5 : c609                     ldab    #09             ;report read error (CRC)
+                        
+80f7 : f78042           nrea16  stab    chksum          ;for later test
+80fa : 5d                       tstb                    ;for FLEX error check
+80fb : 38                       PULX                    ;restore FCB pointer
+80fc : 39                       rts
+                        *
+                        *   Write one sector to 'net drive'
+                        *
+                        * code adaption 6803 same as read code
+                        *
+                        *
+                        *   JUMP TABLE long branches
+                        *
+80fd : 7e8003           Mfwrite  JMP fwrite
+                        *
+8100 : 3c               nwrite  PSHX
+8101 : 36                       PSHA
+8102 : 37                       PSHB
+                        *        ldaa    -64+3,X         ;get requested drive# OFFSET ? !!!
+8103 : a603                     LDAA    3,X             ; check index !!!
+8105 : b7803f                   staa    curdrv
+8108 : b78045                   staa    lstdrv          ;last drive written to
+810b : ce8037                   LDX     #netdrv
+810e : 16                       TAB
+810f : 3a                       ABX
+8110 : a100                     cmpa    0,X             ;same as assigned 'net drive'#?
+8112 : 33                       PULB
+8113 : 32                       PULA
+8114 : 38                       PULX
+8115 : 26e6                     bne     Mfwrite         ;no, do FLEX write routine
+8117 : 3c                       PSHX                    ;save FCB pointer
+8118 : fd8040                   std     curtrk          ;save current ttss#
+811b : 7f8042                   clr     chksum          ;clear checksum
+811e : 7f8043                   clr     chksum+1
+8121 : 7f8044                   clr     cnt             ;256 bytes to send
+                        *
+                        *   Q(uick) Check that remote drive is ready
+                        *
+8124 : b6803b                   ldaa    qcheck
+8127 : 2718                     beq     nqchk2
+                        
+8129 : 8651                     ldaa     #"Q"           ;Send Q command
+812b : bd824d                   JSR     schar
+812e : 2474                     BCC     nwri10          ;"Drive not ready" time out
+8130 : bd822d                   JSR     rchar           ;get response
+8133 : 246f                     BCC     nwri10          ;time out
+8135 : 8106                     cmpa    #ack            ;got an ack?
+8137 : 266b                     bne     nwri10          ;nope, report error
+8139 : b6803c                   ldaa    slowpc
+813c : 2703                     beq     nqchk2
+813e : bd826d                   JSR     delay           ;for "slow PC" ***
+8141 : 8672             nqchk2  ldaa    #"r"            ;Receive sector command
+8143 : bd824d                   JSR     schar
+8146 : 245c                     bcc     nwri10          ;"Drive not ready"
+                        
+8148 : b6803c                   ldaa    slowpc
+814b : 2703                     beq     ntslw2
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    5
+------------------------------------------- FNET03A.ASM -------------------------------------------
+
+                        
+814d : bd826d                   JSR     delay           ;for "slow PC" ***
+8150 : b6803f           ntslw2  ldaa    curdrv          ;drive number
+8153 : bd824d                   JSR     schar
+8156 : 244c                     bcc     nwri10
+8158 : b68040                   ldaa    curtrk          ;tt#
+815b : bd824d                   JSR     schar
+815e : 2444                     bcc     nwri10
+8160 : b68041                   ldaa    curtrk+1        ;ss#
+8163 : bd824d                   JSR     schar
+8166 : 243c                     bcc     nwri10
+8168 : b6803c                   ldaa    slowpc
+816b : 2703                     beq     nwri04
+816d : bd826d                   JSR     delay           ;for "slow PC" ***
+8170 : a600             nwri04  ldaa    0,x             ;get byte from FCB and move pointer
+8172 : 08                       INX
+8173 : bd824d                   JSR     schar
+8176 : 242c                     bcc     nwri10
+8178 : bb8043                   adda    chksum+1        ;update checksum lsb
+817b : b78043                   staa    chksum+1
+817e : 2403                     bcc     nwri08          ;bra if no carry
+8180 : 7c8042                   inc     chksum          ;update checksum msb
+8183 : 7a8044           nwri08  dec     cnt             ;decrease byte count
+8186 : 26e8                     bne     nwri04
+8188 : b68042                   ldaa    chksum          ;send checksum msb
+818b : bd824d                   JSR     schar
+818e : 2414                     bcc     nwri10
+8190 : b68043                   ldaa    chksum+1        ;send checksum lsb
+8193 : bd824d                   JSR     schar
+8196 : 240c                     bcc     nwri10
+8198 : bd822d                   JSR     rchar           ;get response
+819b : 2407                     bcc     nwri10
+819d : 8106                     cmpa    #ack
+819f : 2607                     bne     nwri12          ;bra if not ack
+81a1 : 5f                       clrb                    ;report okay
+81a2 : 2006                     bra     nwri16
+                        
+81a4 : c610             nwri10  ldab    #16             ;report Drive not ready
+81a6 : 2002                     bra     nwri16
+81a8 : c60a             nwri12  ldab    #10             ;disk file write error
+                        
+81aa : f78042           nwri16  stab    chksum          ;for later check
+81ad : 5d                       tstb                    ;for FLEX error check
+81ae : 38                       PULX                    ;restore FCB pointer
+81af : 39                       rts
+                        *
+                        *   JUMP TABLE long branches
+                        *
+81b0 : 7e8006           Mfverfy  JMP fverfy
+81b3 : 7e8009           Mfrestr  JMP frestr
+81b6 : 7e800c           Mfdrive  JMP fdrive
+                        *
+                        *
+                        *   Verify last sector written
+                        *
+81b9 : b68045           nverfy  ldaa    lstdrv          ;was last drive# = new drive#?
+81bc : 3c                       PSHX
+81bd : 37                       PSHB
+81be : ce8037                   LDX     #netdrv
+81c1 : 16                       TAB
+81c2 : 3a                       ABX
+81c3 : a100                     cmpa    0,X             ;same as assigned 'net drive'#?
+                        *       cmpa    netdrv,pcr
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    6
+------------------------------------------- FNET03A.ASM -------------------------------------------
+
+81c5 : 33                       PULB
+81c6 : 38                       PULX
+81c7 : 26e7                     BNE     Mfverfy         ;no, do FLEX verify routine
+                        
+81c9 : f68042                   ldab    chksum          ;get latest checksum test result
+81cc : 5d                       tstb
+81cd : 39                       rts
+                        *
+                        *   Restore to track# 00
+                        *
+81ce : a603             nrestr  lda     3,x             ;get requested drive#
+81d0 : 3c                       PSHX
+81d1 : 37                       PSHB
+81d2 : ce8037                   LDX     #netdrv
+81d5 : 16                       TAB
+81d6 : 3a                       ABX
+81d7 : a100                     cmpa    0,X             ;same as assigned 'net drive'#?
+                        
+                        *       cmpa    netdrv,pcr      ;same as assigned 'net drive'#?
+                        
+81d9 : 33                       PULB
+81da : 38                       PULX
+81db : 26d6                     BNE     Mfrestr         ;no, do FLEX restore routine
+81dd : 5f                       clrb                    ;nothing to do with 'net drive'
+81de : 39                       rts
+                        *
+                        *   Drive select
+                        *
+81df : a603             ndrsel  lda     3,x             ;get requested drive#
+81e1 : 3c                       PSHX
+81e2 : 37                       PSHB
+81e3 : ce8037                   LDX     #netdrv
+81e6 : 16                       TAB
+81e7 : 3a                       ABX
+81e8 : a100                     cmpa    0,x             ;same as assigned 'net drive'#?
+                        *       cmpa    netdrv,pcr      ;same as assigned 'net drive'#?
+81ea : 33                       PULB
+81eb : 38                       PULX
+81ec : 26c8                     BNE     Mfdrive         ;no, do FLEX drive select routine
+                        
+81ee : 5f                       clrb                    ;nothing to do with 'netdrv'
+81ef : 39                       rts
+                        *
+                        *   Check drive ready
+                        *
+81f0 : a603             ncheck  lda     3,x             ;get requested drive#
+81f2 : 3c                       PSHX
+81f3 : 37                       PSHB
+81f4 : ce8037                   LDX     #netdrv
+81f7 : 16                       TAB
+81f8 : 3a                       ABX
+81f9 : a100                     cmpa    0,x             ;same as assigned 'net drive'#?
+                        *       cmpa    netdrv,pcr      ;same as assigned for 'net drive'#?
+81fb : 33                       PULB
+81fc : 38                       PULX
+81fd : 262b                     BNE     Mfcheck          ;no, do FLEX check drive ready routine
+81ff : 200f                     bra     nqui04          ;common for Check & Quick Check
+                        *
+                        *   Quick check drive ready
+                        *
+8201 : a603             nquick  lda     3,x             ;get requested drive#
+8203 : 3c                       PSHX
+8204 : 37                       PSHB
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    7
+------------------------------------------- FNET03A.ASM -------------------------------------------
+
+8205 : ce8037                   LDX     #netdrv
+8208 : 16                       TAB
+8209 : 3a                       ABX
+820a : a100                     cmpa    0,x             ;same as assigned 'net drive'#?
+                        *       cmpa    netdrv,pcr      ;same as assigned for 'net drive'#?
+820c : 33                       PULB
+820d : 38                       PULX
+820e : 2617                     BNE     Mfquick         ;no, do FLEX Quick Check routine
+8210 : 8651             nqui04  ldaa    #"Q"            ;quick check command
+8212 : bd824d                   JSR     schar
+8215 : 240b                     bcc     nqui08
+8217 : 8d14                     bsr     rchar           ;get response
+8219 : 2407                     bcc     nqui08
+821b : 8106                     cmpa    #ack
+821d : 2603                     bne     nqui08          ;not ready
+821f : 5f                       clrb                    ;report drive ready
+8220 : 2003                     bra     nqui12
+8222 : c610             nqui08  ldab    #16             ;report drive not ready
+8224 : 0d                       sec
+8225 : 5d               nqui12  tstb
+8226 : 39                       rts
+                        *
+                        * Long jump branch
+8227 : 7e8012           Mfquick  JMP fquick
+822a : 7e800f           Mfcheck  JMP fcheck
+                        *
+                        *   Receive character.
+                        *   Returns with character in ACCA and CC set if successful,
+                        *                           CC cleared if time-out occurred.
+                        *
+                        *  6803 we use X register !  Set Carry if read/write success
+                        *
+822d : 3c               rchar   PSHX
+822e : 8d57                     bsr     dlyset          ;go set delay
+8230 : fe8047                   ldx     odelc           ;outer delay counter
+8233 : 7f8046                   clr     delcnt          ;inner delay counter
+8236 : f60011           rcha04  ldab    ACIAC1          ;check if char received
+8239 : c480                     ANDB    #$80
+823b : 260a                     bne     rcha08          ;get character
+823d : 7a8046                   dec     delcnt          ;decrement inner delay counter
+8240 : 26f4                     bne     rcha04          ;continue if not = 0
+8242 : 09                       DEX                     ;decrement outer delay counter
+8243 : 26f1                     bne     rcha04          ;continue if not = 0
+8245 : 2004                     bra     rcha12          ;return with CC cleared
+8247 : b60012           rcha08  ldaa    ACIADR          ;read char
+824a : 0d                       SEC                     ; set carry , all o.k.
+824b : 38               rcha12  PULX
+824c : 39                       RTS
+                        *
+                        *   Send character.
+                        *   Returns with CC set if successful,
+                        *                CC cleared if time-out occurred.
+                        *
+824d : 3c               schar   PSHX
+824e : 8d37                     bsr     dlyset          ;go set proper delay
+8250 : fe8047                   ldx     odelc           ;outer delay counter
+8253 : 7f8046                   clr     delcnt          ;inner delay counter
+8256 : f60011           scha04  ldab    ACIAC1          ;check if tdr is empty
+8259 : c420                     ANDB    #$20
+825b : 260a                     bne     scha08          ; transmit end OK, send char
+825d : 7a8046                   dec     delcnt          ;decrement inner delay counter
+8260 : 26f4                     bne     scha04          ;continue if not = 0
+8262 : 09                       DEX                     ;decrement outer delay counter
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    8
+------------------------------------------- FNET03A.ASM -------------------------------------------
+
+8263 : 26f1                     bne     scha04          ;continue if not = 0
+8265 : 2004                     bra     scha12          ;return with CC cleared
+8267 : b70013           scha08  staa    ACIADT          ;send char
+826a : 0d                       SEC                     ; set carry, all o.k.
+826b : 38               scha12  PULX
+826c : 39                       RTS
+                        *
+                        *   Delay routine (for "slow PC")
+                        *
+826d : 5f               delay   clrb
+826e : f7804b                   STAB    BTEMP09
+8271 : c632                     ldab     #50             ;change if needed
+8273 : 7a804b           dela04  DEC     BTEMP09
+8276 : 26fb                     bne     dela04
+8278 : 5a                       decb
+8279 : 26f8                     bne     dela04
+827b : 39                       RTS
+                        *
+                        *  ACIA reset routine SER2 on SBC6803
+                        *
+827c : 8605             reset   ldaa     #$05            ;ACIA master reset
+827e : b70010                   staa     ACIAS
+8281 : 860a                     ldaa     #$0A            ;8 bits,9600B enable T and R
+8283 : b70011                   staa     ACIAC1
+8286 : 39                       rts
+                        *
+                        *  Delay set routine
+                        *  Sets the content of "odelc" as a function of
+                        *  the drive type; destroys y and b
+                        *
+8287 : ff8049           dlyset  STX     XTEMP09
+                        *        ldx     #100            ;default value 
+828a : ceffff                   ldx     #$FFFF   ; with this value is does the job, room for optimi
+828d : f68033                   ldab    drvltr          ;get drive letter
+8290 : c140                     cmpb    #$40            ;is it floppy?
+8292 : 2603                     bne     dlexit          ;no, don't change
+8294 : ceffff                   ldx     #65535          ;select longer delay
+8297 : ff8047           dlexit  stx     odelc
+829a : fe8049                   LDX     XTEMP09
+829d : 39                       rts
+829e =                  drvend  equ     *               ;end of driver package
+                        *
+                        * ---------------------------------------------------------------
+                        *
+                        *   FLEX equates
+                        *
+ad03 =                  warms   equ     $AD03           ;FLEX warm start
+ad1e =                  pstrng  equ     $AD1E           ;write string to display
+ad24 =                  pcrlf   equ     $AD24           ;write cr/lf to display
+ad18 =                  putchr  equ     $AD18           ;write character to display
+ad42 =                  gethex  equ     $AD42           ;get hex number
+                        *
+ac2b =                  memend  equ     $AC2b           ;FLEX end of user RAM
+be00 =                  drvtbl  equ     $BE00           ;start of FLEX driver jump table
+                        *
+                        *   Misc equates
+                        *
+0006 =                  ack     equ     $06             ;acknowledge character
+0015 =                  nak     equ     $15             ;negative acknowledge
+                        
+8045 =                  tmp     equ     lstdrv          ;re-use for temp storage
+8044 =                  tries   equ     cnt             ;re-use for number of tries
+                        *
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page    9
+------------------------------------------- FNET03A.ASM -------------------------------------------
+
+                        * ---------------------------------------------------------------
+                        *
+                        *   The following code will be dropped after a successful
+                        *   line synchronization and relocation of the driver routines.
+                        *
+                        * ---------------------------------------------------------------
+                        *
+a100 =                          org     $A100
+a100 : 2010             start   bra     init
+a102 : 0401             versn   fcb     4,1             ;version number
+                        *
+                        *   New jump address table   copied to net driver section
+                        *
+a104 : 804c             newtbl  fdb     nread           ;read single sector
+a106 : 8100                     fdb     nwrite          ;write single sector
+a108 : 81b9                     fdb     nverfy          ;verify write operation
+a10a : 81ce                     fdb     nrestr          ;restore head to track# 00
+a10c : 81df                     fdb     ndrsel          ;drive select
+a10e : 81f0                     fdb     ncheck          ;check drive ready
+a110 : 8201                     fdb     nquick          ;quick check drive ready
+                        
+                        *---------------------------------------------------------
+                        *
+                        *   Start of installer program init NET jump table
+                        *                              copy from original table
+                        *
+                        *---------------------------------------------------------
+                        *
+                        * Display greeting message and version number
+                        *
+a112 : cea253           init    ldx     #greet          ;point to string
+a115 : fca102                   ldd     versn           ;get version number
+a118 : c33030                   addd    #$3030          ;make ASCII
+a11b : b7a26a                   staa    v1
+a11e : f7a26c                   stab    v1+2
+a121 : bdad1e                   jsr     pstrng          ;go print string
+                        *
+                        * Scan if a copy of FLEXNet is already loaded
+                        * search "netU"
+                        *
+                                
+a124 : ce8015           search  LDX #sgnst
+a127 : 866e                     LDAA #"n"
+a129 : a100                     CMPA 0,X
+a12b : 2614                     BNE error1               ; no match
+a12d : 8665                     LDAA #"e"
+a12f : a101                     CMPA 1,X
+a131 : 260e                     BNE error1
+a133 : 8674                     LDAA #"t"
+a135 : a102                     CMPA 2,X
+a137 : 2608                     BNE error1
+a139 : 8655                     LDAA #"U"
+a13b : a103                     CMPA 3,X
+a13d : 2602                     BNE error1               ; no match finally
+a13f : 2005                     BRA sear4                ; drive code found go copy action
+                        *
+                        * string not found,  tell user
+                        *
+a141 : cea314           error1  ldx     #drvsig         ;drv code not found...
+a144 : 2055                     bra     sync17          ;display then exit
+                        *
+                        * Search done and match found;
+                        * initialize FLEXNet tables and go!
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page   10
+------------------------------------------- FNET03A.ASM -------------------------------------------
+
+                        *
+a146 =                  sear4   equ     *
+                        * Get drive number from user
+a146 : bdad42                   jsr     gethex          ;get hex number
+a149 : 2515                     bcs     nonum           ;skip if not valid
+a14b : 5d                       tstb
+a14c : 2712                     beq     nonum           
+a14e : ff8049                   STX     XTEMP09         ;transfer number to d  
+a151 : fc8049                   LDD     XTEMP09
+a154 : c403                     andb    #$03            ;limit to 3
+a156 : 3c                       PSHX
+a157 : ce8037                   LDX     #netdrv
+a15a : 3a                       ABX                     ; add drive
+a15b : e700                     stab    0,X             ;store in target drive #
+                        *       stab    netdrv          ;store in target drive #
+a15d : 38                       PULX
+a15e : 20e6                     bra     sear4           ;allow multiple drives
+a160 =                  nonum equ *
+                        *
+                        *   Initialize ACIA.
+                        *
+                        * Adaptation SBC6803 system:
+                        *
+0010 =                  ACIAS   equ $0010  ; ACIA first control register
+0011 =                  ACIAC1  equ $0011  ; ACIA second control register
+0012 =                  ACIADR  equ $0012  ; ACIA data register receive
+0013 =                  ACIADT  equ $0013  ; ACIA data register transfer
+                        *
+                        *   ACIA on port #0
+                        
+0000 =                  port    equ     0
+d010 =                  BOARD   EQU     16*port+$D010
+                        
+d010 =                  aciac   EQU     BOARD         ;    ACIA CONTROL REGISTER
+d011 =                  aciad   EQU     aciac+1       ;    ACIA DATA REGISTER
+                        *
+a160 : bd827c                   jsr     reset         ;call the ACIA reset routine
+                        *
+                        * default to short delay (i.e. hard disk)
+                        *
+a163 : ce4000                   ldx     #$4000
+a166 : ff8047                   stx     odelc
+                        *   Check if host is ready; "sync" with $55
+                        *   and then $aa. This will verify that 8 bits
+                        *   are transferred correctly.
+                        *
+a169 : 8605             sync    ldaa    #5              ;number of tries
+a16b : b78044                   staa    tries
+a16e : 8655                     ldaa    #$55            ;1:st sync char
+a170 : b78045           sync04  staa    tmp
+a173 : bd824d           sync08  JSR     schar           ;send char
+a176 : 2420                     bcc     sync16          ;time out, report error
+a178 : bd822d                   JSR     rchar           ;get answer from receiver
+a17b : 241b                     bcc     sync16
+a17d : b18045                   cmpa    tmp             ;same as sent?
+a180 : 270e                     beq     sync12          ;yes
+                        
+a182 : b68045                   ldaa    tmp
+a185 : 8155                     cmpa    #$55            ;1:st sync char?
+a187 : 260f                     bne     sync16          ;nope, something is wrong
+                        
+a189 : 7a8044                   dec     tries           ;decrease try count
+a18c : 26e5                     bne     sync08          ;try again if not 0
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page   11
+------------------------------------------- FNET03A.ASM -------------------------------------------
+
+a18e : 2008                     bra     sync16          ;report sync error
+                        
+a190 : 81aa             sync12  cmpa    #$aa            ;2:nd sync char?
+a192 : 270d                     beq     sync20          ;yes, continue
+                        
+a194 : 86aa                     ldaa    #$aa            ;send 2:nd sync char
+a196 : 20d8                     bra     sync04
+                        
+a198 : cea26e           sync16  ldx     #synstr         ;"Can't sync..."
+a19b : bdad1e           sync17  jsr     pstrng
+a19e : 7ead03                   jmp     warms           ;back to FLEX
+                        *
+a1a1 : cea28a           sync20  ldx     #scnest         ;"Serial connection established"
+a1a4 : bdad1e                   jsr     pstrng
+                        
+                        *
+                        *   Now do a "Where am I" command
+                        *
+a1a7 : 863f                     ldaa    #"?"
+a1a9 : bd824d                   JSR     schar
+a1ac : 24ea                     bcc     sync16
+                        *
+                        *   Receive the current drive and folder string,
+                        *   and keep the first letter, with some processing:
+                        *   @ if floppy, other if hard disk
+                        *
+a1ae : bd822d                   JSR     rchar
+a1b1 : 24e5                     bcc     sync16          ;exit if time-out
+a1b3 : 36                       PSHA                    ;save character
+a1b4 : 8001                     suba    #1              ;A/B becomes @/A
+a1b6 : 845e                     anda    #$5E            ;make upper case
+a1b8 : b78033                   staa    drvltr          ;store it as @ if floppy
+a1bb : 8140                     cmpa    #$40            ;is it floppy?
+a1bd : 2606                     bne     wtack           ;no, leave as-is
+a1bf : ceffff                   ldx     #$FFFF          ;set long delay
+a1c2 : ff8047                   stx     odelc           ;store it
+                        *
+                        *   receive all other characters and discard them
+                        *   until the final ACK is received
+                        *
+a1c5 : bd822d           wtack   JSR     rchar
+a1c8 : 24ce                     bcc     sync16
+a1ca : 8106                     cmpa    #ack
+a1cc : 26f7                     bne     wtack
+                        *
+                        *   Inform user about the current drive
+                        *
+a1ce : cea2fb                   ldx     #drvmsg         ;point to string
+a1d1 : bdad1e                   jsr     pstrng          ;print it
+a1d4 : 32                       PULA                    ;retrieve original char
+a1d5 : 845f                     anda    #$5f            ;make upper case
+a1d7 : bdad18                   jsr     putchr          ;print it
+a1da : 863a                     LDAA    #":"            ;... then print ":"
+a1dc : bdad18                   jsr     putchr
+                        *
+                        *   Copy FLEX driver jump table to new location and original to jump table
+                        *
+a1df : cebe81                   LDX     #$BE81      ; start jump vectors inc aways 3+
+                        * fread
+a1e2 : ec00                     LDD     0,X         ; get address original FLEX2
+a1e4 : fd8001                   STD     fread+1     ; FLEX2 value to jump table
+a1e7 : fca104                   LDD     newtbl      ; get new NET value
+a1ea : ed00                     STD     0,X         ; put into FLEX driver section
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page   12
+------------------------------------------- FNET03A.ASM -------------------------------------------
+
+                        * fwrite
+a1ec : ec03                     LDD     3,X         ; get address original FLEX2
+a1ee : fd8004                   STD     fwrite+1    ; FLEX2 value to jump table
+a1f1 : fca106                   LDD     newtbl+2    ; get new NET value
+a1f4 : ed03                     STD     3,X         ; put into FLEX driver section        
+                        * fverfy
+a1f6 : ec06                     LDD     6,X         ; get address original FLEX2
+a1f8 : fd8007                   STD     fverfy+1    ; FLEX2 value to jump table
+a1fb : fca108                   LDD     newtbl+4    ; get new NET value
+a1fe : ed06                     STD     6,X         ; put into FLEX driver section  
+                        * frestr
+a200 : ec09                     LDD     9,X         ; get address original FLEX2
+a202 : fd800a                   STD     frestr+1    ; FLEX2 value to jump table
+a205 : fca10a                   LDD     newtbl+6    ; get new NET value
+a208 : ed09                     STD     9,X         ; put into FLEX driver section  
+                        * fdrive
+a20a : ec0c                     LDD     12,X        ; get address original FLEX2
+a20c : fd800d                   STD     fdrive+1    ; FLEX2 value to jump table
+a20f : fca10c                   LDD     newtbl+8    ; get new NET value
+a212 : ed0c                     STD     12,X        ; put into FLEX driver section  
+                        * fcheck
+a214 : ec0f                     LDD     15,X        ; get address original FLEX2
+a216 : fd8010                   STD     fcheck+1    ; FLEX2 value to jump table
+a219 : fca10e                   LDD     newtbl+10   ; get new NET value
+a21c : ed0f                     STD     15,X        ; put into FLEX driver section  
+                        * fquick
+a21e : ec12                     LDD     18,X        ; get address original FLEX2
+a220 : fd8013                   STD     fquick+1    ; FLEX2 value to jump table
+a223 : fca110                   LDD     newtbl+12   ; get new NET value
+a226 : ed12                     STD     18,X        ; put into FLEX driver section  
+                        * 
+                        * insert JMP into jump table
+                        *
+a228 : 867e                     LDAA    #$7E
+a22a : b78000                   STAA    fread
+a22d : b78003                   STAA    fwrite
+a230 : b78006                   STAA    fverfy
+a233 : b78009                   STAA    frestr
+a236 : b7800c                   STAA    fdrive
+a239 : b7800f                   STAA    fcheck
+a23c : b78012                   STAA    fquick
+                        *       
+a23f : cea2a8                   ldx     #instst         ;"Remote .DSK ...
+a242 : bdad1e                   jsr     pstrng
+a245 : b68037                   ldaa    netdrv          ;get 'net drive'#
+a248 : 8b30                     adda    #$30            ;make ASCII
+a24a : bdad18                   jsr     putchr
+a24d : bdad24                   jsr     pcrlf
+a250 : 7ead03                   jmp     warms
+                        *
+                        * Messages to the user
+                        *
+a253 : 464c45584e6574.. greet   fcc     "FLEXNet driver version "
+a26a : 002e0004         v1      fcb     0,".",0,4
+a26e : 43616e27742073.. synstr  fcc     "Can't sync serial transfer!"
+a289 : 04                       fcb      4
+a28a : 53657269616c20.. scnest  fcc     "Serial connection established"
+a2a7 : 04                       fcb      4
+a2a8 : 52656d6f746520.. instst  fcc     "Remote .DSK drive installed as drive #"
+a2ce : 04                       fcb      4
+a2cf : 464c45584e6574.. alread  fcc     "FLEXNet is already loaded, no action taken."
+a2fa : 04                       fcb      4
+a2fb : 43757272656e74.. drvmsg  fcc     "Current MS-DOS drive is "
+AS02 Assembler for M6802 [1.40].  Copyright 1994-2005, Frank A. Kingswood                 Page   13
+------------------------------------------- FNET03A.ASM -------------------------------------------
+
+a313 : 04                       fcb      4
+a314 : 44726976657220.. drvsig  fcc     "Driver signature not recognized!"
+a334 : 04                       FCB      4
+                        *
+                                end     ; start
+                        
+No errors in pass 2.
